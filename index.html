@@ -46,7 +46,6 @@
   #enter-btn { margin-top: 40px; padding: 16px 56px; background: transparent; border: 1px solid #d4a843; color: #d4a843; font-family: 'Syncopate', sans-serif; font-size: 10px; letter-spacing: 5px; text-transform: uppercase; cursor: pointer; transition: all 0.4s; display: none; }
   #enter-btn:hover { background: #d4a843; color: #000; }
 
-  /* ── VR Button ───────────────────────────────────────────── */
   #VRButton {
     position: fixed;
     bottom: 80px;
@@ -81,7 +80,6 @@
 
 <canvas id="canvas"></canvas>
 
-<!-- Botón VR — oculto hasta que initVRButton() lo muestre -->
 <button id="VRButton" style="display:none">Entrar en VR</button>
 
 <div id="hud">
@@ -133,8 +131,9 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 renderer.outputEncoding = THREE.sRGBEncoding;
 
-// ── [1] WEBXR: habilitar soporte VR en el renderer ───────────
+// ── WEBXR: habilitar y fijar espacio de referencia ANTES de cualquier sesión ──
 renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor'); // ← FIX CLAVE #1
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x03030a);
@@ -504,9 +503,7 @@ function showCarInfo(car) {
   document.getElementById('info-panel').classList.add('visible');
 }
 
-// ===================== [2] WEBXR VR BUTTON =====================
-// Implementación inline del VRButton, sin dependencias externas.
-// Comprueba isSessionSupported, gestiona sesión y cambia etiqueta.
+// ===================== WEBXR VR BUTTON =====================
 function initVRButton() {
   const btn = document.getElementById('VRButton');
   let currentSession = null;
@@ -517,17 +514,33 @@ function initVRButton() {
     btn.textContent = 'Salir de VR';
     currentSession = session;
   }
+
   function onSessionEnded() {
-    currentSession && currentSession.removeEventListener('end', onSessionEnded);
+    if (currentSession) currentSession.removeEventListener('end', onSessionEnded);
     btn.textContent = 'Entrar en VR';
     currentSession = null;
   }
 
   btn.onclick = () => {
     if (currentSession) { currentSession.end(); return; }
-    navigator.xr.requestSession('immersive-vr', {
-      optionalFeatures: ['local-floor','bounded-floor','hand-tracking','layers']
-    }).then(onSessionStarted).catch(err => console.warn('WebXR session failed:', err));
+
+    // FIX #2: local-floor como requiredFeature (no optional)
+    // FIX #3: eliminado 'layers' que causa fallos silenciosos en Quest
+    const sessionInit = {
+      requiredFeatures: ['local-floor'],
+      optionalFeatures: ['bounded-floor', 'hand-tracking']
+    };
+
+    navigator.xr.requestSession('immersive-vr', sessionInit)
+      .then(onSessionStarted)
+      .catch(err => {
+        console.warn('WebXR con local-floor falló, reintentando con viewer:', err);
+        // Fallback: si el headset no reporta suelo, usar 'viewer'
+        renderer.xr.setReferenceSpaceType('viewer');
+        return navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['bounded-floor','hand-tracking'] });
+      })
+      .then(session => { if (session) onSessionStarted(session); })
+      .catch(err2 => console.error('WebXR session fallida definitivamente:', err2));
   };
 
   if ('xr' in navigator) {
@@ -537,9 +550,15 @@ function initVRButton() {
         btn.disabled      = !supported;
         btn.style.display = 'block';
       })
-      .catch(() => { btn.textContent='VR no disponible'; btn.disabled=true; btn.style.display='block'; });
+      .catch(() => {
+        btn.textContent   = 'VR no disponible';
+        btn.disabled      = true;
+        btn.style.display = 'block';
+      });
   } else {
-    btn.textContent='WebXR no soportado'; btn.disabled=true; btn.style.display='block';
+    btn.textContent   = 'WebXR no soportado';
+    btn.disabled      = true;
+    btn.style.display = 'block';
   }
 }
 
@@ -547,7 +566,6 @@ function initVRButton() {
 const clock = new THREE.Clock();
 
 function animate() {
-  // ── NO requestAnimationFrame aquí ── setAnimationLoop lo llama
   const dt = clock.getDelta();
   const t  = clock.getElapsedTime();
 
@@ -560,7 +578,7 @@ function animate() {
   }
   pGeo.attributes.position.needsUpdate = true;
 
-  // Movimiento desktop (desactivado mientras XR está presentando)
+  // Movimiento desktop — desactivado cuando XR está presentando
   if (isLocked && !renderer.xr.isPresenting) {
     euler.set(pitch,yaw,0); camera.quaternion.setFromEuler(euler);
     const speed = keys['ShiftLeft'] ? 9 : 5;
@@ -594,15 +612,9 @@ window.addEventListener('load', () => {
 
 function enterMuseum() {
   document.getElementById('loader').classList.add('hidden');
-
-  // ── [3] setAnimationLoop en lugar de requestAnimationFrame ──
-  // Obligatorio para WebXR: Three.js reemplaza el loop con el
-  // proporcionado por la XRSession cuando el modo VR está activo.
+  // setAnimationLoop es obligatorio para WebXR
   renderer.setAnimationLoop(animate);
-
-  // Inicializar el botón VR una vez el museo está en marcha
   initVRButton();
-
   setTimeout(()=>canvas.requestPointerLock(), 600);
 }
 
