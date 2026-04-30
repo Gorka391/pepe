@@ -127,14 +127,13 @@ const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerH
 camera.position.set(0, 1.65, 10);
 
 // ===================== XR PLAYER RIG =====================
-// El rig es el contenedor que se mueve; la cámara es hija del rig.
-// En modo VR, Three.js pone la cámara dentro de renderer.xr.getCamera(),
-// pero el rig nos permite desplazar toda la escena del jugador.
+// El rig envuelve la cámara. En VR, Three.js gestiona la pose de la cámara
+// internamente; mover el rig desplaza al jugador en el mundo.
 const playerRig = new THREE.Group();
-playerRig.position.set(0, 0, 10);  // posición inicial en el museo
+playerRig.position.set(0, 0, 10);
 scene.add(playerRig);
 playerRig.add(camera);
-camera.position.set(0, 1.65, 0);   // altura de los ojos dentro del rig
+camera.position.set(0, 0, 0);  // en VR la altura la da el headset; en desktop la ponemos en el loop
 
 // ===================== LIGHTING =====================
 function setupLighting() {
@@ -524,13 +523,18 @@ function processVRControllers(dt) {
   const session = renderer.xr.getSession();
   if (!session) return;
 
-  // Obtenemos los inputSources conectados
+  // En Three.js r128, getCamera() sin argumentos devuelve la ArrayCamera XR
+  // cuya posición y orientación mundiales reflejan la pose actual del headset.
+  const xrCam = renderer.xr.getCamera(camera);
+  // Extraemos la orientación del headset en espacio mundo
+  xrCam.getWorldQuaternion(_vrQ);
+
   for (const src of session.inputSources) {
     if (!src.gamepad) continue;
-    const axes = src.gamepad.axes;       // [touchpad_x, touchpad_y, joystick_x, joystick_y] o [ax0,ax1,ax2,ax3]
-    // La mayoría de headsets WebXR expone el joystick en axes[2] y axes[3]
-    // (Quest, Pico, etc.). Algunos más antiguos usan axes[0] y axes[1].
-    // Comprobamos cuál par tiene mayor magnitud.
+    const axes = src.gamepad.axes;
+
+    // Joystick principal: Quest/Pico/Index usan axes[2] y axes[3]
+    // Fallback a axes[0] y axes[1] para headsets más antiguos
     let ax, ay;
     if (axes.length >= 4) {
       const mag01 = Math.sqrt(axes[0]*axes[0]+axes[1]*axes[1]);
@@ -545,49 +549,27 @@ function processVRControllers(dt) {
     if (ax === 0 && ay === 0) continue;
 
     if (src.handedness === 'left') {
-      // ── TRASLACIÓN ──────────────────────────────────────────────
-      // Obtenemos la orientación actual de la cámara XR (cabeza del jugador)
-      // y la proyectamos en el plano XZ para calcular adelante/derecha.
-      const xrCamera = renderer.xr.getCamera(camera);
-      xrCamera.getWorldQuaternion(_vrQ);
-
-      // Vector "adelante" en espacio mundo aplanado
+      // Dirección "adelante" basada en orientación del headset, plano XZ
       _vrDir.set(0, 0, -1).applyQuaternion(_vrQ);
       _vrDir.y = 0;
       if (_vrDir.lengthSq() < 0.0001) _vrDir.set(0, 0, -1);
       _vrDir.normalize();
 
-      // Vector "derecha"
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(_vrQ);
-      right.y = 0;
-      right.normalize();
+      right.y = 0; right.normalize();
 
-      // Combinamos: joystick Y → adelante/atrás, joystick X → derecha/izquierda
       const move = new THREE.Vector3();
       move.addScaledVector(_vrDir, -ay * VR_SPEED * dt);
       move.addScaledVector(right,   ax * VR_SPEED * dt);
 
-      // Aplicamos al rig con límites del museo
       playerRig.position.add(move);
       playerRig.position.x = Math.max(-32, Math.min(32, playerRig.position.x));
       playerRig.position.z = Math.max(-15, Math.min(14, playerRig.position.z));
-      playerRig.position.y = 0;  // fijamos al suelo
+      playerRig.position.y = 0;
 
     } else if (src.handedness === 'right') {
-      // ── ROTACIÓN (snap o smooth) ────────────────────────────────
-      // Usamos rotación suave (smooth turn). Si prefieres snap turn
-      // de 30°, descomenta el bloque alternativo de abajo.
+      // Rotación suave
       playerRig.rotation.y -= ax * VR_TURN_SPEED * dt;
-
-      /* ── Snap Turn (alternativa) ──────────────────────────────
-      const SNAP = 30 * (Math.PI / 180);
-      if (!src._snapCooldown) src._snapCooldown = 0;
-      src._snapCooldown -= dt;
-      if (src._snapCooldown <= 0 && Math.abs(ax) > 0.6) {
-        playerRig.rotation.y -= Math.sign(ax) * SNAP;
-        src._snapCooldown = 0.35;
-      }
-      ────────────────────────────────────────────────────────── */
     }
   }
 }
@@ -602,6 +584,10 @@ function initVRButton() {
     renderer.xr.setSession(session);
     btn.textContent = 'Salir de VR';
     currentSession = session;
+    // Reseteamos la posición local de la cámara dentro del rig;
+    // el headset la controlará en espacio local desde aquí.
+    camera.position.set(0, 0, 0);
+    camera.quaternion.identity();
   }
   function onSessionEnded() {
     currentSession && currentSession.removeEventListener('end', onSessionEnded);
@@ -654,15 +640,19 @@ function animate() {
     if(keys['KeyS']||keys['ArrowDown'])  dir.z+=1;
     if(keys['KeyA']||keys['ArrowLeft'])  dir.x-=1;
     if(keys['KeyD']||keys['ArrowRight']) dir.x+=1;
-    if(dir.length()>0) { dir.normalize().applyEuler(new THREE.Euler(0,yaw,0)); camera.position.addScaledVector(dir,speed*dt); }
-    // En modo desktop la cámara está en el rig, ajustamos posición en el rig
-    camera.position.y=1.65;
-    camera.position.x=Math.max(-32,Math.min(32,camera.position.x));
-    camera.position.z=Math.max(-15,Math.min(14,camera.position.z));
-    let nearest=Infinity,nearCar=null;
-    // Calculamos posición mundial de la cámara
+    if(dir.length()>0) {
+      dir.normalize().applyEuler(new THREE.Euler(0,yaw,0));
+      playerRig.position.addScaledVector(dir, speed*dt);
+    }
+    // Altura de ojos en desktop
+    camera.position.set(0, 1.65, 0);
+    playerRig.position.x = Math.max(-32, Math.min(32, playerRig.position.x));
+    playerRig.position.z = Math.max(-15, Math.min(14, playerRig.position.z));
+    playerRig.position.y = 0;
+
     const camWorld = new THREE.Vector3();
     camera.getWorldPosition(camWorld);
+    let nearest=Infinity, nearCar=null;
     carMeshes.forEach(cm=>{ const d=camWorld.distanceTo(new THREE.Vector3(...cm.data.position)); if(d<nearest){nearest=d;nearCar=cm;} });
     const lbl=document.getElementById('proximity-label');
     if(nearest<5.5){lbl.textContent=`${nearCar.data.brand} ${nearCar.data.name} · ${nearCar.data.year}`;lbl.classList.add('show');}
