@@ -45,24 +45,13 @@
   .loader-hint { margin-top: 28px; font-family: 'Syncopate', sans-serif; font-size: 9px; letter-spacing: 4px; color: rgba(255,255,255,0.25); text-transform: uppercase; }
   #enter-btn { margin-top: 40px; padding: 16px 56px; background: transparent; border: 1px solid #d4a843; color: #d4a843; font-family: 'Syncopate', sans-serif; font-size: 10px; letter-spacing: 5px; text-transform: uppercase; cursor: pointer; transition: all 0.4s; display: none; }
   #enter-btn:hover { background: #d4a843; color: #000; }
-
   #VRButton {
-    position: fixed;
-    bottom: 80px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 20;
-    padding: 14px 44px;
-    background: transparent;
-    border: 1px solid #d4a843;
-    color: #d4a843;
-    font-family: 'Syncopate', sans-serif;
-    font-size: 10px;
-    letter-spacing: 5px;
-    text-transform: uppercase;
-    cursor: pointer;
-    transition: background 0.4s, color 0.4s;
-    pointer-events: all;
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    z-index: 20; padding: 14px 44px; background: transparent;
+    border: 1px solid #d4a843; color: #d4a843;
+    font-family: 'Syncopate', sans-serif; font-size: 10px; letter-spacing: 5px;
+    text-transform: uppercase; cursor: pointer;
+    transition: background 0.4s, color 0.4s; pointer-events: all;
   }
   #VRButton:hover:not(:disabled) { background: #d4a843; color: #000; }
   #VRButton:disabled { opacity: 0.35; cursor: default; border-color: rgba(212,168,67,0.3); }
@@ -79,7 +68,6 @@
 </div>
 
 <canvas id="canvas"></canvas>
-
 <button id="VRButton" style="display:none">Entrar en VR</button>
 
 <div id="hud">
@@ -130,16 +118,23 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 renderer.outputEncoding = THREE.sRGBEncoding;
-
-// ── WEBXR: habilitar y fijar espacio de referencia ANTES de cualquier sesión ──
 renderer.xr.enabled = true;
-renderer.xr.setReferenceSpaceType('local-floor'); // ← FIX CLAVE #1
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x03030a);
 scene.fog = new THREE.FogExp2(0x03030a, 0.028);
 const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.05, 200);
 camera.position.set(0, 1.65, 10);
+
+// ===================== XR PLAYER RIG =====================
+// El rig es el contenedor que se mueve; la cámara es hija del rig.
+// En modo VR, Three.js pone la cámara dentro de renderer.xr.getCamera(),
+// pero el rig nos permite desplazar toda la escena del jugador.
+const playerRig = new THREE.Group();
+playerRig.position.set(0, 0, 10);  // posición inicial en el museo
+scene.add(playerRig);
+playerRig.add(camera);
+camera.position.set(0, 1.65, 0);   // altura de los ojos dentro del rig
 
 // ===================== LIGHTING =====================
 function setupLighting() {
@@ -464,7 +459,7 @@ for (let i = 0; i < particleCount; i++) {
 pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
 scene.add(new THREE.Points(pGeo, new THREE.PointsMaterial({color:0xd4a843,size:0.025,transparent:true,opacity:0.35})));
 
-// ===================== CONTROLS =====================
+// ===================== DESKTOP CONTROLS =====================
 const keys = {};
 let isLocked = false, pitch = 0, yaw = 0;
 const euler = new THREE.Euler(0,0,0,'YXZ');
@@ -503,7 +498,101 @@ function showCarInfo(car) {
   document.getElementById('info-panel').classList.add('visible');
 }
 
-// ===================== WEBXR VR BUTTON =====================
+// ===================== VR LOCOMOTION CON JOYSTICK =====================
+//
+// Estrategia:
+//   • Mando IZQUIERDO  (index 0): joystick izq → traslación (mover por el museo)
+//   • Mando DERECHO    (index 1): joystick der → rotación (girar la vista)
+//   • Umbral de zona muerta: 0.12 (evita deriva del joystick)
+//   • Velocidad de movimiento: 4 m/s   Velocidad de giro: 1.2 rad/s
+//   • La dirección de avance se calcula a partir de la orientación del mando
+//     izquierdo proyectada en el plano horizontal, para que "adelante"
+//     coincida siempre con hacia donde apunta el mando, no la cabeza.
+//     Si prefieres que avance hacia donde miras, se usa la cámara XR.
+//
+const VR_SPEED      = 4.0;   // metros/segundo
+const VR_TURN_SPEED = 1.2;   // radianes/segundo
+const VR_DEADZONE   = 0.12;
+const _vrDir        = new THREE.Vector3();
+const _vrQ          = new THREE.Quaternion();
+
+function applyDeadzone(v) { return Math.abs(v) < VR_DEADZONE ? 0 : v; }
+
+function processVRControllers(dt) {
+  if (!renderer.xr.isPresenting) return;
+
+  const session = renderer.xr.getSession();
+  if (!session) return;
+
+  // Obtenemos los inputSources conectados
+  for (const src of session.inputSources) {
+    if (!src.gamepad) continue;
+    const axes = src.gamepad.axes;       // [touchpad_x, touchpad_y, joystick_x, joystick_y] o [ax0,ax1,ax2,ax3]
+    // La mayoría de headsets WebXR expone el joystick en axes[2] y axes[3]
+    // (Quest, Pico, etc.). Algunos más antiguos usan axes[0] y axes[1].
+    // Comprobamos cuál par tiene mayor magnitud.
+    let ax, ay;
+    if (axes.length >= 4) {
+      const mag01 = Math.sqrt(axes[0]*axes[0]+axes[1]*axes[1]);
+      const mag23 = Math.sqrt(axes[2]*axes[2]+axes[3]*axes[3]);
+      if (mag23 >= mag01) { ax = axes[2]; ay = axes[3]; }
+      else                { ax = axes[0]; ay = axes[1]; }
+    } else {
+      ax = axes[0] || 0; ay = axes[1] || 0;
+    }
+    ax = applyDeadzone(ax);
+    ay = applyDeadzone(ay);
+    if (ax === 0 && ay === 0) continue;
+
+    if (src.handedness === 'left') {
+      // ── TRASLACIÓN ──────────────────────────────────────────────
+      // Obtenemos la orientación actual de la cámara XR (cabeza del jugador)
+      // y la proyectamos en el plano XZ para calcular adelante/derecha.
+      const xrCamera = renderer.xr.getCamera(camera);
+      xrCamera.getWorldQuaternion(_vrQ);
+
+      // Vector "adelante" en espacio mundo aplanado
+      _vrDir.set(0, 0, -1).applyQuaternion(_vrQ);
+      _vrDir.y = 0;
+      if (_vrDir.lengthSq() < 0.0001) _vrDir.set(0, 0, -1);
+      _vrDir.normalize();
+
+      // Vector "derecha"
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(_vrQ);
+      right.y = 0;
+      right.normalize();
+
+      // Combinamos: joystick Y → adelante/atrás, joystick X → derecha/izquierda
+      const move = new THREE.Vector3();
+      move.addScaledVector(_vrDir, -ay * VR_SPEED * dt);
+      move.addScaledVector(right,   ax * VR_SPEED * dt);
+
+      // Aplicamos al rig con límites del museo
+      playerRig.position.add(move);
+      playerRig.position.x = Math.max(-32, Math.min(32, playerRig.position.x));
+      playerRig.position.z = Math.max(-15, Math.min(14, playerRig.position.z));
+      playerRig.position.y = 0;  // fijamos al suelo
+
+    } else if (src.handedness === 'right') {
+      // ── ROTACIÓN (snap o smooth) ────────────────────────────────
+      // Usamos rotación suave (smooth turn). Si prefieres snap turn
+      // de 30°, descomenta el bloque alternativo de abajo.
+      playerRig.rotation.y -= ax * VR_TURN_SPEED * dt;
+
+      /* ── Snap Turn (alternativa) ──────────────────────────────
+      const SNAP = 30 * (Math.PI / 180);
+      if (!src._snapCooldown) src._snapCooldown = 0;
+      src._snapCooldown -= dt;
+      if (src._snapCooldown <= 0 && Math.abs(ax) > 0.6) {
+        playerRig.rotation.y -= Math.sign(ax) * SNAP;
+        src._snapCooldown = 0.35;
+      }
+      ────────────────────────────────────────────────────────── */
+    }
+  }
+}
+
+// ===================== VR BUTTON =====================
 function initVRButton() {
   const btn = document.getElementById('VRButton');
   let currentSession = null;
@@ -514,33 +603,17 @@ function initVRButton() {
     btn.textContent = 'Salir de VR';
     currentSession = session;
   }
-
   function onSessionEnded() {
-    if (currentSession) currentSession.removeEventListener('end', onSessionEnded);
+    currentSession && currentSession.removeEventListener('end', onSessionEnded);
     btn.textContent = 'Entrar en VR';
     currentSession = null;
   }
 
   btn.onclick = () => {
     if (currentSession) { currentSession.end(); return; }
-
-    // FIX #2: local-floor como requiredFeature (no optional)
-    // FIX #3: eliminado 'layers' que causa fallos silenciosos en Quest
-    const sessionInit = {
-      requiredFeatures: ['local-floor'],
-      optionalFeatures: ['bounded-floor', 'hand-tracking']
-    };
-
-    navigator.xr.requestSession('immersive-vr', sessionInit)
-      .then(onSessionStarted)
-      .catch(err => {
-        console.warn('WebXR con local-floor falló, reintentando con viewer:', err);
-        // Fallback: si el headset no reporta suelo, usar 'viewer'
-        renderer.xr.setReferenceSpaceType('viewer');
-        return navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['bounded-floor','hand-tracking'] });
-      })
-      .then(session => { if (session) onSessionStarted(session); })
-      .catch(err2 => console.error('WebXR session fallida definitivamente:', err2));
+    navigator.xr.requestSession('immersive-vr', {
+      optionalFeatures: ['local-floor','bounded-floor','hand-tracking','layers']
+    }).then(onSessionStarted).catch(err => console.warn('WebXR session failed:', err));
   };
 
   if ('xr' in navigator) {
@@ -550,15 +623,9 @@ function initVRButton() {
         btn.disabled      = !supported;
         btn.style.display = 'block';
       })
-      .catch(() => {
-        btn.textContent   = 'VR no disponible';
-        btn.disabled      = true;
-        btn.style.display = 'block';
-      });
+      .catch(() => { btn.textContent='VR no disponible'; btn.disabled=true; btn.style.display='block'; });
   } else {
-    btn.textContent   = 'WebXR no soportado';
-    btn.disabled      = true;
-    btn.style.display = 'block';
+    btn.textContent='WebXR no soportado'; btn.disabled=true; btn.style.display='block';
   }
 }
 
@@ -578,7 +645,7 @@ function animate() {
   }
   pGeo.attributes.position.needsUpdate = true;
 
-  // Movimiento desktop — desactivado cuando XR está presentando
+  // ── Movimiento desktop ────────────────────────────────────────
   if (isLocked && !renderer.xr.isPresenting) {
     euler.set(pitch,yaw,0); camera.quaternion.setFromEuler(euler);
     const speed = keys['ShiftLeft'] ? 9 : 5;
@@ -588,15 +655,22 @@ function animate() {
     if(keys['KeyA']||keys['ArrowLeft'])  dir.x-=1;
     if(keys['KeyD']||keys['ArrowRight']) dir.x+=1;
     if(dir.length()>0) { dir.normalize().applyEuler(new THREE.Euler(0,yaw,0)); camera.position.addScaledVector(dir,speed*dt); }
+    // En modo desktop la cámara está en el rig, ajustamos posición en el rig
     camera.position.y=1.65;
     camera.position.x=Math.max(-32,Math.min(32,camera.position.x));
     camera.position.z=Math.max(-15,Math.min(14,camera.position.z));
     let nearest=Infinity,nearCar=null;
-    carMeshes.forEach(cm=>{ const d=camera.position.distanceTo(new THREE.Vector3(...cm.data.position)); if(d<nearest){nearest=d;nearCar=cm;} });
+    // Calculamos posición mundial de la cámara
+    const camWorld = new THREE.Vector3();
+    camera.getWorldPosition(camWorld);
+    carMeshes.forEach(cm=>{ const d=camWorld.distanceTo(new THREE.Vector3(...cm.data.position)); if(d<nearest){nearest=d;nearCar=cm;} });
     const lbl=document.getElementById('proximity-label');
     if(nearest<5.5){lbl.textContent=`${nearCar.data.brand} ${nearCar.data.name} · ${nearCar.data.year}`;lbl.classList.add('show');}
     else lbl.classList.remove('show');
   }
+
+  // ── Movimiento VR con joystick ────────────────────────────────
+  processVRControllers(dt);
 
   renderer.render(scene, camera);
 }
@@ -612,7 +686,6 @@ window.addEventListener('load', () => {
 
 function enterMuseum() {
   document.getElementById('loader').classList.add('hidden');
-  // setAnimationLoop es obligatorio para WebXR
   renderer.setAnimationLoop(animate);
   initVRButton();
   setTimeout(()=>canvas.requestPointerLock(), 600);
