@@ -126,14 +126,16 @@ scene.fog = new THREE.FogExp2(0x03030a, 0.028);
 const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.05, 200);
 camera.position.set(0, 1.65, 10);
 
-// ===================== XR PLAYER RIG =====================
-// El rig envuelve la cámara. En VR, Three.js gestiona la pose de la cámara
-// internamente; mover el rig desplaza al jugador en el mundo.
-const playerRig = new THREE.Group();
-playerRig.position.set(0, 0, 10);
-scene.add(playerRig);
-playerRig.add(camera);
-camera.position.set(0, 0, 0);  // en VR la altura la da el headset; en desktop la ponemos en el loop
+// ===================== CAMERA & PLAYER POSITION =====================
+// Cámara directamente en la escena. Para VR, Three.js r128 gestiona
+// internamente la pose del headset sobre esta cámara.
+// El offset de posición del jugador se aplica mediante vrOffset.
+camera.position.set(0, 1.65, 10);
+scene.add(camera);
+
+// Vector de posición del jugador en el mundo (usado tanto en desktop como VR)
+const vrOffset = new THREE.Vector3(0, 0, 10);
+let vrYaw = 0; // rotación horizontal del jugador en VR
 
 // ===================== LIGHTING =====================
 function setupLighting() {
@@ -554,57 +556,48 @@ function applyDeadzone(v) { return Math.abs(v) < VR_DEADZONE ? 0 : v; }
 
 function processVRControllers(dt) {
   if (!renderer.xr.isPresenting) return;
-
   const session = renderer.xr.getSession();
   if (!session) return;
 
-  // En Three.js r128, getCamera() sin argumentos devuelve la ArrayCamera XR
-  // cuya posición y orientación mundiales reflejan la pose actual del headset.
-  const xrCam = renderer.xr.getCamera(camera);
-  // Extraemos la orientación del headset en espacio mundo
-  xrCam.getWorldQuaternion(_vrQ);
+  // Orientación actual del headset en espacio mundo
+  camera.getWorldQuaternion(_vrQ);
 
   for (const src of session.inputSources) {
     if (!src.gamepad) continue;
     const axes = src.gamepad.axes;
-
-    // Joystick principal: Quest/Pico/Index usan axes[2] y axes[3]
-    // Fallback a axes[0] y axes[1] para headsets más antiguos
     let ax, ay;
     if (axes.length >= 4) {
       const mag01 = Math.sqrt(axes[0]*axes[0]+axes[1]*axes[1]);
       const mag23 = Math.sqrt(axes[2]*axes[2]+axes[3]*axes[3]);
       if (mag23 >= mag01) { ax = axes[2]; ay = axes[3]; }
       else                { ax = axes[0]; ay = axes[1]; }
-    } else {
-      ax = axes[0] || 0; ay = axes[1] || 0;
-    }
+    } else { ax = axes[0]||0; ay = axes[1]||0; }
     ax = applyDeadzone(ax);
     ay = applyDeadzone(ay);
     if (ax === 0 && ay === 0) continue;
 
     if (src.handedness === 'left') {
-      // Dirección "adelante" basada en orientación del headset, plano XZ
+      // Dirección de avance basada en orientación del headset, plano XZ
       _vrDir.set(0, 0, -1).applyQuaternion(_vrQ);
       _vrDir.y = 0;
       if (_vrDir.lengthSq() < 0.0001) _vrDir.set(0, 0, -1);
       _vrDir.normalize();
-
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(_vrQ);
       right.y = 0; right.normalize();
 
-      const move = new THREE.Vector3();
-      move.addScaledVector(_vrDir, -ay * VR_SPEED * dt);
-      move.addScaledVector(right,   ax * VR_SPEED * dt);
+      vrOffset.addScaledVector(_vrDir, -ay * VR_SPEED * dt);
+      vrOffset.addScaledVector(right,   ax * VR_SPEED * dt);
+      vrOffset.x = Math.max(-32, Math.min(32, vrOffset.x));
+      vrOffset.z = Math.max(-15, Math.min(14, vrOffset.z));
+      vrOffset.y = 0;
 
-      playerRig.position.add(move);
-      playerRig.position.x = Math.max(-32, Math.min(32, playerRig.position.x));
-      playerRig.position.z = Math.max(-15, Math.min(14, playerRig.position.z));
-      playerRig.position.y = 0;
+      // Aplicamos el offset a la cámara (Three.js XR suma la pose del headset encima)
+      camera.position.x = vrOffset.x;
+      camera.position.z = vrOffset.z;
 
     } else if (src.handedness === 'right') {
-      // Rotación suave
-      playerRig.rotation.y -= ax * VR_TURN_SPEED * dt;
+      vrYaw -= ax * VR_TURN_SPEED * dt;
+      camera.rotation.y = vrYaw;
     }
   }
 }
@@ -614,27 +607,34 @@ function initVRButton() {
   const btn = document.getElementById('VRButton');
   let currentSession = null;
 
-  function onSessionStarted(session) {
+  async function onSessionStarted(session) {
     session.addEventListener('end', onSessionEnded);
-    renderer.xr.setSession(session);
+    // CRÍTICO: setSession() es async — hay que await para que el reference
+    // space esté listo antes de que el loop intente renderizar en XR.
+    await renderer.xr.setSession(session);
     btn.textContent = 'Salir de VR';
     currentSession = session;
-    // Reseteamos la posición local de la cámara dentro del rig;
-    // el headset la controlará en espacio local desde aquí.
-    camera.position.set(0, 0, 0);
-    camera.quaternion.identity();
-  }
-  function onSessionEnded() {
-    currentSession && currentSession.removeEventListener('end', onSessionEnded);
-    btn.textContent = 'Entrar en VR';
-    currentSession = null;
   }
 
-  btn.onclick = () => {
+  function onSessionEnded() {
+    if (currentSession) currentSession.removeEventListener('end', onSessionEnded);
+    btn.textContent = 'Entrar en VR';
+    currentSession = null;
+    // Restaurar cámara desktop
+    camera.position.set(0, 1.65, 0);
+    camera.quaternion.identity();
+  }
+
+  btn.onclick = async () => {
     if (currentSession) { currentSession.end(); return; }
-    navigator.xr.requestSession('immersive-vr', {
-      optionalFeatures: ['local-floor','bounded-floor','hand-tracking','layers']
-    }).then(onSessionStarted).catch(err => console.warn('WebXR session failed:', err));
+    try {
+      const session = await navigator.xr.requestSession('immersive-vr', {
+        optionalFeatures: ['local-floor', 'bounded-floor', 'layers']
+      });
+      await onSessionStarted(session);
+    } catch(err) {
+      console.warn('WebXR session failed:', err);
+    }
   };
 
   if ('xr' in navigator) {
@@ -644,9 +644,15 @@ function initVRButton() {
         btn.disabled      = !supported;
         btn.style.display = 'block';
       })
-      .catch(() => { btn.textContent='VR no disponible'; btn.disabled=true; btn.style.display='block'; });
+      .catch(() => {
+        btn.textContent = 'VR no disponible';
+        btn.disabled = true;
+        btn.style.display = 'block';
+      });
   } else {
-    btn.textContent='WebXR no soportado'; btn.disabled=true; btn.style.display='block';
+    btn.textContent = 'WebXR no soportado';
+    btn.disabled = true;
+    btn.style.display = 'block';
   }
 }
 
@@ -677,18 +683,16 @@ function animate() {
     if(keys['KeyD']||keys['ArrowRight']) dir.x+=1;
     if(dir.length()>0) {
       dir.normalize().applyEuler(new THREE.Euler(0,yaw,0));
-      playerRig.position.addScaledVector(dir, speed*dt);
+      camera.position.addScaledVector(dir, speed*dt);
     }
-    // Altura de ojos en desktop
-    camera.position.set(0, 1.65, 0);
-    playerRig.position.x = Math.max(-32, Math.min(32, playerRig.position.x));
-    playerRig.position.z = Math.max(-15, Math.min(14, playerRig.position.z));
-    playerRig.position.y = 0;
+    camera.position.y = 1.65;
+    camera.position.x = Math.max(-32, Math.min(32, camera.position.x));
+    camera.position.z = Math.max(-15, Math.min(14, camera.position.z));
+    // Sincronizamos vrOffset con posición desktop por si luego entra en VR
+    vrOffset.copy(camera.position); vrOffset.y = 0;
 
-    const camWorld = new THREE.Vector3();
-    camera.getWorldPosition(camWorld);
     let nearest=Infinity, nearCar=null;
-    carMeshes.forEach(cm=>{ const d=camWorld.distanceTo(new THREE.Vector3(...cm.data.position)); if(d<nearest){nearest=d;nearCar=cm;} });
+    carMeshes.forEach(cm=>{ const d=camera.position.distanceTo(new THREE.Vector3(...cm.data.position)); if(d<nearest){nearest=d;nearCar=cm;} });
     const lbl=document.getElementById('proximity-label');
     if(nearest<5.5){lbl.textContent=`${nearCar.data.brand} ${nearCar.data.name} · ${nearCar.data.year}`;lbl.classList.add('show');}
     else lbl.classList.remove('show');
