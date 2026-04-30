@@ -241,22 +241,57 @@ function mats(d) {
 }
 
 // ===================== WHEEL BUILDER =====================
+// Cada rueda se construye en un grupo local donde el eje de la rueda es Y.
+// Al final se rota el grupo -PI/2 en X para que el eje quede en Z (lateral del coche),
+// y el neumático quede vertical y perpendicular al eje del vehículo.
 function buildWheel(m,g,x,y,z,radius,width,spokeType) {
-  const tire=new THREE.Mesh(new THREE.TorusGeometry(radius,radius*0.28,10,28),m.rubber);
-  tire.rotation.y=Math.PI/2; tire.position.set(x,y,z); g.add(tire);
-  if (spokeType==='wire') {
-    for (let s=0;s<16;s++){const sp=new THREE.Mesh(new THREE.CylinderGeometry(0.008,0.008,radius*1.8,4),m.chrome);sp.rotation.z=s*Math.PI/16;sp.position.set(x,y,z);g.add(sp);}
-    const hub=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,width*1.05,12),m.accent);hub.rotation.z=Math.PI/2;hub.position.set(x,y,z);g.add(hub);
-    const cap=new THREE.Mesh(new THREE.CylinderGeometry(0.06,0.06,0.03,12),m.chrome);cap.rotation.z=Math.PI/2;cap.position.set(x+width*0.53,y,z);g.add(cap);
-  } else if (spokeType==='eared') {
-    const rb=new THREE.Mesh(new THREE.CylinderGeometry(radius*0.82,radius*0.82,width*0.9,16),m.rim);rb.rotation.z=Math.PI/2;rb.position.set(x,y,z);g.add(rb);
-    for(let s=0;s<6;s++){const a=s*Math.PI/3;const sp=new THREE.Mesh(new THREE.BoxGeometry(width*0.85,radius*0.14,radius*0.14),m.rim);sp.rotation.x=a;sp.rotation.z=Math.PI/2;sp.position.set(x,y+Math.sin(a)*radius*0.38,z+Math.cos(a)*radius*0.38);g.add(sp);}
-    const hub=new THREE.Mesh(new THREE.CylinderGeometry(0.1,0.1,width*1.05,12),m.chrome);hub.rotation.z=Math.PI/2;hub.position.set(x,y,z);g.add(hub);
-    const nut=new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,0.06,6),m.chrome);nut.rotation.z=Math.PI/2;nut.position.set(x+width*0.55,y,z);g.add(nut);
+  const wg = new THREE.Group();
+  wg.position.set(x,y,z);
+  g.add(wg);
+
+  // Neumático: TorusGeometry por defecto en plano XZ con eje Y → vertical, correcto
+  const tire = new THREE.Mesh(new THREE.TorusGeometry(radius, radius*0.28, 14, 32), m.rubber);
+  wg.add(tire);
+
+  if (spokeType === 'wire') {
+    for (let s = 0; s < 16; s++) {
+      const a = s * Math.PI / 16;
+      const sp = new THREE.Mesh(new THREE.CylinderGeometry(0.007,0.007,radius*1.85,4), m.chrome);
+      sp.rotation.z = a;
+      wg.add(sp);
+    }
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,width*1.05,12), m.accent);
+    wg.add(hub);
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.055,0.055,0.04,12), m.chrome);
+    cap.position.y = width*0.53;
+    wg.add(cap);
+  } else if (spokeType === 'eared') {
+    const rb = new THREE.Mesh(new THREE.CylinderGeometry(radius*0.82,radius*0.82,width*0.88,20), m.rim);
+    wg.add(rb);
+    for (let s = 0; s < 6; s++) {
+      const a = s * Math.PI / 3;
+      const sp = new THREE.Mesh(new THREE.BoxGeometry(radius*0.14, width*0.82, radius*0.14), m.rim);
+      sp.position.set(Math.cos(a)*radius*0.4, 0, Math.sin(a)*radius*0.4);
+      wg.add(sp);
+    }
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.1,0.1,width*1.05,12), m.chrome);
+    wg.add(hub);
+    const nut = new THREE.Mesh(new THREE.CylinderGeometry(0.075,0.075,0.07,6), m.chrome);
+    nut.position.y = width*0.54;
+    wg.add(nut);
   } else {
-    for(let s=0;s<10;s++){const a=s*Math.PI/10;const sp=new THREE.Mesh(new THREE.BoxGeometry(0.012,radius*1.82,0.012),m.chromeWarm);sp.rotation.z=a;sp.position.set(x,y,z);g.add(sp);}
-    const hub=new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,width*1.05,12),m.chromeWarm);hub.rotation.z=Math.PI/2;hub.position.set(x,y,z);g.add(hub);
+    for (let s = 0; s < 10; s++) {
+      const a = s * Math.PI / 10;
+      const sp = new THREE.Mesh(new THREE.BoxGeometry(0.014, radius*1.82, 0.014), m.chromeWarm);
+      sp.rotation.z = a;
+      wg.add(sp);
+    }
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,width*1.05,12), m.chromeWarm);
+    wg.add(hub);
   }
+
+  // Gira el grupo para que el eje Y (eje de rueda) quede apuntando en X (lateral del coche)
+  wg.rotation.z = Math.PI/2;
 }
 
 // ===================== CAR BUILDERS =====================
@@ -429,7 +464,7 @@ function buildFerrari250GTO(d){const g=new THREE.Group(),m=mats(d);
   [[1.08,0.36,0.74],[1.08,0.36,-0.74],[-1.05,0.36,0.74],[-1.05,0.36,-0.74]].forEach(([x,y,z])=>{
     buildWheel(m,g,x,y,z,0.32,0.65,'eared');
     const cap=new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,0.67,8),new THREE.MeshStandardMaterial({color:0xcc2200,roughness:0.3,metalness:0.5}));
-    cap.rotation.z=Math.PI/2;cap.position.set(x,y,z);g.add(cap);
+    cap.rotation.x=Math.PI/2;cap.position.set(x,y,z);g.add(cap);
   });
   return g;
 }
